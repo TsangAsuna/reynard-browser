@@ -1,0 +1,11 @@
+Package: com.guacforlife.reynarddefault
+Name: ReynardDefault
+Version: 1.5.1
+Architecture: iphoneos-arm
+Description: Redirects Safari URL opens to Reynard browser. Toggle in Settings and Control Centre. iPadOS 15.x compatible (inline Settings switch, no preference bundle).
+Maintainer: TsangAsuna
+Author: guacforlife
+Section: Tweaks
+Depends: mobilesubstrate, preferenceloader
+Recommends: com.opa334.ccsupport
+Homepage: https://github.com/TsangAsuna/ReynardDefault

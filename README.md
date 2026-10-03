@@ -80,7 +80,7 @@ On iOS/iPadOS 14+ the *Settings → Safari → Default Browser App* list is norm
 
 If it does not appear on your device (e.g. iPadOS 15.1), install the companion **ReynardDefault** tweak from [`support/reynarddefault/`](support/reynarddefault/) to redirect links that would open in Safari straight into Reynard:
 
-- Grab a prebuilt deb from this fork's [Releases](https://github.com/TsangAsuna/reynard-browser/releases) (built by `.github/workflows/build-tweak.yml`), or build it yourself with Theos: `cd support/reynarddefault && make rootless` (or `make rootful`).
+- Grab a prebuilt deb from the companion repo's [Releases](https://github.com/TsangAsuna/ReynardDefaultBrowser/releases) (v1.5.1+), or build it yourself with Theos: `cd support/reynarddefault && make rootless` (or `make rootful`).
 - Rootless debs (`*_iphoneos-arm64.deb`) are for Dopamine/Roothide; rootful debs (`*_iphoneos-arm.deb`) are for unc0ver/palera1n rootful.
 - The toggle is an inline switch in the main Settings list and does not load any preference bundle, so it cannot crash the Settings app (this fork fixes the iPadOS 15.1 crash found in [guacforlife/ReynardDefault](https://github.com/guacforlife/ReynardDefault), on which the tweak is based).
 

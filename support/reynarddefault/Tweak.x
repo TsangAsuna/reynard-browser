@@ -3,6 +3,7 @@
 
 @interface FBSystemServiceOpenApplicationRequest : NSObject
 @property (nonatomic, copy) NSURL *URL;
+@property (nonatomic, copy) NSString *bundleIdentifier;
 @end
 
 static NSString *const kReynardBundleID = @"com.minh-ton.Reynard";
@@ -20,16 +21,17 @@ static void loadPrefs(void) {
     globalRedirect = globalValue ? [globalValue boolValue] : YES;
 }
 
+static BOOL isWebLinkURL(NSURL *url) {
+    if (url == nil) return NO;
+    NSString *scheme = url.scheme.lowercaseString;
+    return [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+}
+
 // Wrap http(s) URLs as reynard://open?url=<encoded> so iOS routes them via
 // the scheme Reynard actually claims. Reynard's SceneDelegate decodes this
-// form back to the original URL. Returns nil for anything that is not a web
-// link (plain app launches carry no URL at all, so browser icons stay
-// launchable).
+// form back to the original URL (and also accepts plain http(s) URLs).
 static NSURL *wrapHTTPURLForReynard(NSURL *original) {
-    NSString *scheme = original.scheme.lowercaseString;
-    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) {
-        return nil;
-    }
+    if (!isWebLinkURL(original)) return nil;
     NSCharacterSet *allowed = [NSCharacterSet URLQueryAllowedCharacterSet];
     NSString *encoded = [original.absoluteString stringByAddingPercentEncodingWithAllowedCharacters:allowed];
     if (!encoded) return nil;
@@ -37,10 +39,10 @@ static NSURL *wrapHTTPURLForReynard(NSURL *original) {
 }
 
 // Per-app redirect sources ("redirect.<bundle id>" keys, written by Reynard's
-// "Default Browser Redirect" screen for any installed app or by the quick
-// per-browser switches in system Settings). Only consulted when the global
-// switch is off. With nothing configured, Safari is the default source so
-// links other apps hand to Safari land in Reynard out of the box.
+// "Default Browser Redirect" screen or the quick switches in system
+// Settings). Only consulted when the global switch is off. With nothing
+// configured, Safari is the default source so links other apps hand to
+// Safari land in Reynard out of the box.
 static BOOL shouldRedirectBundle(NSString *bundleIdentifier) {
 	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
 	id value = [prefs objectForKey:[@"redirect." stringByAppendingString:bundleIdentifier]];
@@ -50,25 +52,49 @@ static BOOL shouldRedirectBundle(NSString *bundleIdentifier) {
 
 %hook FBSystemServiceOpenApplicationRequest
 
+// Fire on both property orders: some opens assign the URL before the bundle
+// identifier, others after. Only requests that actually carry a web link are
+// ever hijacked, so plain browser launches (no URL, e.g. icon taps) always
+// open the real browser.
 - (void)setBundleIdentifier:(NSString *)bundleIdentifier {
     loadPrefs();
-    NSURL *wrapped = nil;
+    BOOL redirect = NO;
     if (enabled
         && bundleIdentifier != nil
         && ![bundleIdentifier isEqualToString:kReynardBundleID]
         && [self respondsToSelector:@selector(URL)]
-        && [self respondsToSelector:@selector(setURL:)]) {
-        if (globalRedirect || shouldRedirectBundle(bundleIdentifier)) {
-            wrapped = wrapHTTPURLForReynard(self.URL);
+        && isWebLinkURL([self URL])
+        && (globalRedirect || shouldRedirectBundle(bundleIdentifier))) {
+        redirect = YES;
+        if ([self respondsToSelector:@selector(setURL:)]) {
+            NSURL *wrapped = wrapHTTPURLForReynard([self URL]);
+            if (wrapped) [self setURL:wrapped];
         }
+        // Without a setURL: accessor the request keeps carrying the original
+        // http(s) URL, which Reynard's SceneDelegate handles directly.
     }
 
-    if (wrapped) {
-        self.URL = wrapped;
+    if (redirect) {
         %orig(kReynardBundleID);
     } else {
-        // Plain app launches (no web link) always open the real browser.
         %orig;
+    }
+}
+
+- (void)setURL:(NSURL *)URL {
+    %orig;
+    loadPrefs();
+    if (!enabled) return;
+    if (![self respondsToSelector:@selector(URL)]) return;
+    if (!isWebLinkURL([self URL])) return;
+
+    NSString *bundleIdentifier = [self bundleIdentifier];
+    if (bundleIdentifier == nil || [bundleIdentifier isEqualToString:kReynardBundleID]) return;
+    if (globalRedirect || shouldRedirectBundle(bundleIdentifier)) {
+        // Routes through the hooked setter above, which performs the swap
+        // exactly once. The wrapped URL is no longer a web link, so no
+        // recursion happens.
+        self.bundleIdentifier = kReynardBundleID;
     }
 }
 

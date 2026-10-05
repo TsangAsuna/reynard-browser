@@ -483,9 +483,19 @@ final class DownloadsViewController: UIViewController, UITableViewDataSource, UI
                 DownloadStore.shared.removeDownload(id: item.id)
                 completion(true)
             }
-            
+
+            var actions = [deleteAction]
+            if item.canResume {
+                let resumeAction = UIContextualAction(style: .normal, title: NSLocalizedString("Resume", comment: "Download action")) { _, _, completion in
+                    DownloadStore.shared.resume(id: item.id)
+                    completion(true)
+                }
+                resumeAction.backgroundColor = .systemBlue
+                actions.append(resumeAction)
+            }
+
             guard item.state == .completed, item.fileExists else {
-                let configuration = UISwipeActionsConfiguration(actions: [deleteAction])
+                let configuration = UISwipeActionsConfiguration(actions: actions)
                 configuration.performsFirstActionWithFullSwipe = true
                 return configuration
             }

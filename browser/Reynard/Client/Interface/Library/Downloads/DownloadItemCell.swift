@@ -139,20 +139,26 @@ final class DownloadItemCell: UITableViewCell {
         case .paused:
             representedFileURL = nil
             representedDownloadID = item.id
-            statusLabel.text = NSLocalizedString("Paused", comment: "Download state")
+            statusLabel.text = Self.interruptedStatusText(
+                fallback: NSLocalizedString("Paused", comment: "Download state"),
+                item: item
+            )
             progressView.isHidden = true
             progressView.progress = 0
             let placeholderIcon = Self.iconProvider.genericPlaceholderIcon()
             fileIconView.image = placeholderIcon
             fileIconView.transform = .identity
             fileIconView.tintColor = placeholderIcon == nil ? .label : nil
-            
+
         case .cancelled, .failed:
             representedFileURL = nil
             representedDownloadID = item.id
             statusLabel.text = item.state == .cancelled
             ? NSLocalizedString("Cancelled", comment: "Download state")
-            : NSLocalizedString("Failed", comment: "Download state")
+            : Self.interruptedStatusText(
+                fallback: NSLocalizedString("Failed", comment: "Download state"),
+                item: item
+            )
             progressView.isHidden = true
             progressView.progress = 0
             fileIconView.image = Self.iconProvider.genericPlaceholderIcon()
@@ -229,7 +235,19 @@ final class DownloadItemCell: UITableViewCell {
     }
     
     // MARK: - Formatting
-    
+
+    private static func interruptedStatusText(fallback: String, item: DownloadItemSnapshot) -> String {
+        guard item.canResume, item.downloadedBytes > 0 else {
+            return fallback
+        }
+
+        return String(
+            format: NSLocalizedString("%@ · %@ downloaded", comment: "Interrupted download state with bytes"),
+            fallback,
+            formattedByteCount(item.downloadedBytes)
+        )
+    }
+
     private static func formattedByteCount(_ byteCount: Int64) -> String {
         let units = [
             NSLocalizedString("bytes", comment: ""),

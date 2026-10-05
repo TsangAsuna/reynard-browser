@@ -43,6 +43,7 @@ struct DownloadItemSnapshot {
     let mimeType: String?
     let state: State
     let canPause: Bool
+    let canResume: Bool
     let fileExists: Bool
     let totalBytes: Int64?
     let downloadedBytes: Int64
@@ -74,11 +75,12 @@ final class DownloadStore: NSObject {
     
     private enum PersistedDownloadState: String, Codable {
         case inProgress = "active"
+        case paused
         case cancelled
         case completed
         case failed
     }
-    
+
     private struct PersistedDownloadEntry: Codable {
         let id: UUID
         let fileName: String
@@ -89,9 +91,17 @@ final class DownloadStore: NSObject {
         let fileSize: Int64
         let addedAt: Date
         var state: PersistedDownloadState?
-        
+        // Resume data lets an interrupted or paused transfer continue from the
+        // bytes already downloaded, including after an app relaunch.
+        var resumeData: Data?
+        var downloadedBytes: Int64?
+
         var effectiveState: PersistedDownloadState {
             return state ?? .completed
+        }
+
+        var isResumable: Bool {
+            return resumeData != nil && effectiveState != .completed && effectiveState != .cancelled
         }
     }
     
@@ -108,13 +118,14 @@ final class DownloadStore: NSObject {
         let destinationURL: URL
         let mimeType: String?
         let addedAt: Date
-        let task: URLSessionDownloadTask
+        var task: URLSessionDownloadTask
         var expectedBytes: Int64?
         var downloadedBytes: Int64
         var bytesPerSecond: Int64
         var lastProgressSample: ProgressSample?
         var isPaused: Bool
-        
+        var autoRetryCount: Int
+
         init(
             id: UUID,
             sourceURL: URL,
@@ -123,7 +134,8 @@ final class DownloadStore: NSObject {
             destinationURL: URL,
             mimeType: String?,
             addedAt: Date,
-            task: URLSessionDownloadTask
+            task: URLSessionDownloadTask,
+            expectedBytes: Int64? = nil
         ) {
             self.id = id
             self.sourceURL = sourceURL
@@ -133,19 +145,14 @@ final class DownloadStore: NSObject {
             self.mimeType = mimeType
             self.addedAt = addedAt
             self.task = task
-            self.expectedBytes = nil
+            self.expectedBytes = expectedBytes
             self.downloadedBytes = 0
             self.bytesPerSecond = 0
             self.isPaused = false
+            self.autoRetryCount = 0
         }
     }
-    
-    private struct CapturedDownloadControls {
-        let cancel: () -> Void
-        let pause: () -> Void
-        let resume: () -> Void
-    }
-    
+
     private final class CapturedDownload {
         let id: UUID
         let localFilePath: String
@@ -154,14 +161,13 @@ final class DownloadStore: NSObject {
         let destinationURL: URL
         let mimeType: String?
         let addedAt: Date
-        let controls: CapturedDownloadControls?
         weak var originatingSession: GeckoSession?
         var expectedBytes: Int64?
         var downloadedBytes: Int64
         var bytesPerSecond: Int64
         var lastProgressSample: ProgressSample?
         var isPaused: Bool
-        
+
         init(
             id: UUID,
             localFilePath: String,
@@ -171,7 +177,6 @@ final class DownloadStore: NSObject {
             mimeType: String?,
             addedAt: Date,
             expectedBytes: Int64?,
-            controls: CapturedDownloadControls? = nil,
             originatingSession: GeckoSession? = nil
         ) {
             self.id = id
@@ -181,7 +186,6 @@ final class DownloadStore: NSObject {
             self.destinationURL = destinationURL
             self.mimeType = mimeType
             self.addedAt = addedAt
-            self.controls = controls
             self.originatingSession = originatingSession
             self.expectedBytes = expectedBytes
             self.downloadedBytes = 0
@@ -252,28 +256,27 @@ final class DownloadStore: NSObject {
         guard let sourceURL = URL(string: response.url) else {
             return nil
         }
-        
+
         let fileName = sanitizedFileName(
             suggestedFileName: response.filename,
             sourceURL: sourceURL
         )
-        let controls = CapturedDownloadControls(
-            cancel: response.cancel,
-            pause: response.pause,
-            resume: response.resume
-        )
-        
+
         return PendingDownload(
             fileName: fileName,
             startHandler: { [weak self] in
-                self?.beginCapturedDownload(
-                    localFilePath: response.localFilePath,
+                // Stop the engine transfer; the file is fetched by URLSession instead.
+                // Unlike the engine's networking stack, URLSession honors the system
+                // HTTP proxy and supports resumable transfers (resume data), so
+                // interrupted downloads can continue instead of failing outright.
+                response.cancel()
+                self?.enqueueDownload(
                     sourceURL: sourceURL,
-                    fileName: fileName,
+                    originalURL: nil,
+                    suggestedFileName: response.filename,
                     mimeType: response.mimeType,
-                    expectedBytes: response.contentLength,
-                    controls: controls,
-                    originatingSession: session
+                    responseHeaders: response.headers,
+                    expectedBytes: response.contentLength
                 )
                 return nil
             }
@@ -374,7 +377,7 @@ final class DownloadStore: NSObject {
     }
     
     // MARK: - Download Management
-    
+
     func cancel(id: UUID) {
         stateQueue.async {
             if let active = self.activeDownloads.values.first(where: { $0.id == id }) {
@@ -386,56 +389,89 @@ final class DownloadStore: NSObject {
                 self.postDidChange()
                 return
             }
-            
-            guard let captured = self.capturedDownloads.values.first(where: { $0.id == id }) else {
+
+            if let captured = self.capturedDownloads.values.first(where: { $0.id == id }) {
+                self.capturedDownloads.removeValue(forKey: captured.localFilePath)
+                self.storePersistedEntryLocked(
+                    self.makePersistedEntry(for: captured, state: .cancelled)
+                )
+                self.postDidChange()
                 return
             }
-            
-            self.capturedDownloads.removeValue(forKey: captured.localFilePath)
-            self.storePersistedEntryLocked(
-                self.makePersistedEntry(for: captured, state: .cancelled)
-            )
-            captured.controls?.cancel()
-            self.postDidChange()
+
+            // Persisted interrupted/paused downloads: cancelling discards the
+            // saved resume data and drops the entry, matching user expectation
+            // that a cancelled download no longer shows up as resumable.
+            if let index = self.persistedDownloads.firstIndex(where: { $0.id == id }),
+               self.persistedDownloads[index].effectiveState != .completed {
+                self.persistedDownloads.remove(at: index)
+                self.savePersistedDownloadsLocked()
+                self.postDidChange()
+            }
         }
     }
-    
+
     func pause(id: UUID) {
         stateQueue.async {
             if let active = self.activeDownloads.values.first(where: { $0.id == id }) {
                 guard !active.isPaused else {
                     return
                 }
-                
-                active.task.suspend()
+
                 active.isPaused = true
                 active.bytesPerSecond = 0
                 active.lastProgressSample = nil
+                let downloadedBytes = active.downloadedBytes
+                self.activeDownloads.removeValue(forKey: active.task.taskIdentifier)
+
+                // Checkpoint the transfer into resume data so the pause survives
+                // an app relaunch; resuming creates a new task from that data.
+                active.task.cancel(byProducingResumeData: { [weak self] resumeData in
+                    guard let self else {
+                        return
+                    }
+
+                    self.stateQueue.async {
+                        if let resumeData {
+                            self.storePersistedEntryLocked(
+                                self.makePersistedEntry(
+                                    for: active,
+                                    state: .paused,
+                                    downloadedBytes: downloadedBytes,
+                                    resumeData: resumeData
+                                )
+                            )
+                        } else {
+                            self.storePersistedEntryLocked(
+                                self.makePersistedEntry(for: active, state: .cancelled)
+                            )
+                        }
+                        self.postDidChange()
+                    }
+                })
                 self.postDidChange()
                 return
             }
-            
+
             guard let captured = self.capturedDownloads.values.first(where: { $0.id == id }),
-                  let controls = captured.controls,
                   !captured.isPaused else {
                 return
             }
-            
-            controls.pause()
+
             captured.isPaused = true
             captured.bytesPerSecond = 0
             captured.lastProgressSample = nil
             self.postDidChange()
         }
     }
-    
+
     func resume(id: UUID) {
         stateQueue.async {
             if let active = self.activeDownloads.values.first(where: { $0.id == id }) {
                 guard active.isPaused else {
                     return
                 }
-                
+
                 active.task.resume()
                 active.isPaused = false
                 active.bytesPerSecond = 0
@@ -443,14 +479,53 @@ final class DownloadStore: NSObject {
                 self.postDidChange()
                 return
             }
-            
+
+            // Resumable persisted download (paused or interrupted, possibly
+            // from a previous app session): build a new transfer from the
+            // saved resume data and keep the entry around (still marked
+            // in progress with its resume data) so a crash mid-resume stays
+            // recoverable.
+            if let index = self.persistedDownloads.firstIndex(where: { $0.id == id }),
+               let resumeData = self.persistedDownloads[index].resumeData,
+               self.persistedDownloads[index].isResumable {
+                let entry = self.persistedDownloads[index]
+                guard !self.activeDownloads.values.contains(where: { $0.id == entry.id }),
+                      let sourceURL = URL(string: entry.sourceURLString) else {
+                    return
+                }
+
+                let task = self.session.downloadTask(withResumeData: resumeData)
+                let active = ActiveDownload(
+                    id: entry.id,
+                    sourceURL: sourceURL,
+                    originalURL: entry.originalURLString.flatMap(URL.init(string:)),
+                    fileName: entry.fileName,
+                    destinationURL: self.storage.downloadsDirectoryURL.appendingPathComponent(
+                        entry.relativePath,
+                        isDirectory: false
+                    ),
+                    mimeType: entry.mimeType,
+                    addedAt: entry.addedAt,
+                    task: task
+                )
+                active.downloadedBytes = entry.downloadedBytes ?? 0
+
+                self.activeDownloads[task.taskIdentifier] = active
+                var updatedEntry = entry
+                updatedEntry.state = .inProgress
+                self.persistedDownloads[index] = updatedEntry
+                self.savePersistedDownloadsLocked()
+
+                task.resume()
+                self.postDidChange()
+                return
+            }
+
             guard let captured = self.capturedDownloads.values.first(where: { $0.id == id }),
-                  let controls = captured.controls,
                   captured.isPaused else {
                 return
             }
-            
-            controls.resume()
+
             captured.isPaused = false
             captured.bytesPerSecond = 0
             captured.lastProgressSample = nil
@@ -537,41 +612,71 @@ final class DownloadStore: NSObject {
     }
     
     // MARK: - Captured Downloads
-    
-    private func beginCapturedDownload(
-        localFilePath: String,
+
+    // MARK: - URL Session Downloads
+
+    private func enqueueDownload(
         sourceURL: URL,
-        fileName: String,
+        originalURL: URL?,
+        suggestedFileName: String?,
         mimeType: String?,
-        expectedBytes: Int64?,
-        controls: CapturedDownloadControls,
-        originatingSession: GeckoSession
+        responseHeaders: [ExternalResponseHeader]? = nil,
+        expectedBytes: Int64? = nil
     ) {
-        stateQueue.sync {
+        stateQueue.async {
             self.prepareStorageLocked()
-            
-            let destinationURL = self.makeUniqueDestinationURLLocked(for: fileName)
-            let active = CapturedDownload(
-                id: UUID(),
-                localFilePath: localFilePath,
+
+            let fileName = self.resolvedFileName(
+                suggestedFileName: suggestedFileName,
                 sourceURL: sourceURL,
+                mimeType: mimeType
+            )
+            let destinationURL = self.makeUniqueDestinationURLLocked(for: fileName)
+
+            let request = URLRequest(url: sourceURL)
+            if let responseHeaders {
+                // The engine hands over the original response headers; forward the
+                // request-relevant ones so authenticated/CDN downloads keep working
+                // when re-requested outside the engine.
+                let forwardedNames: Set<String> = [
+                    "cookie",
+                    "authorization",
+                    "user-agent",
+                    "referer",
+                    "origin",
+                    "proxy-authorization",
+                ]
+                for header in responseHeaders {
+                    let lowercasedName = header.name.lowercased()
+                    if forwardedNames.contains(lowercasedName) || lowercasedName.hasPrefix("x-") {
+                        request.setValue(header.value, forHTTPHeaderField: header.name)
+                    }
+                }
+            }
+
+            let task = self.session.downloadTask(with: request)
+            let active = ActiveDownload(
+                id: UUID(),
+                sourceURL: sourceURL,
+                originalURL: originalURL,
                 fileName: destinationURL.lastPathComponent,
                 destinationURL: destinationURL,
                 mimeType: mimeType,
                 addedAt: Date(),
-                expectedBytes: expectedBytes,
-                controls: controls,
-                originatingSession: originatingSession
+                task: task,
+                expectedBytes: expectedBytes
             )
-            self.capturedDownloads[localFilePath] = active
+
+            self.activeDownloads[task.taskIdentifier] = active
             self.storePersistedEntryLocked(
                 self.makePersistedEntry(for: active, state: .inProgress)
             )
+            task.resume()
             self.postDidStartDownload()
             self.postDidChange()
         }
     }
-    
+
     private func beginWebExtensionDownload(
         sourceURL: URL,
         suggestedFileName: String?,
@@ -622,47 +727,7 @@ final class DownloadStore: NSObject {
             )
         }
     }
-    
-    // MARK: - URL Session Downloads
-    
-    private func enqueueDownload(
-        sourceURL: URL,
-        originalURL: URL?,
-        suggestedFileName: String?,
-        mimeType: String?
-    ) {
-        stateQueue.async {
-            self.prepareStorageLocked()
-            
-            let fileName = self.resolvedFileName(
-                suggestedFileName: suggestedFileName,
-                sourceURL: sourceURL,
-                mimeType: mimeType
-            )
-            let destinationURL = self.makeUniqueDestinationURLLocked(for: fileName)
-            
-            let task = self.session.downloadTask(with: sourceURL)
-            let active = ActiveDownload(
-                id: UUID(),
-                sourceURL: sourceURL,
-                originalURL: originalURL,
-                fileName: destinationURL.lastPathComponent,
-                destinationURL: destinationURL,
-                mimeType: mimeType,
-                addedAt: Date(),
-                task: task
-            )
-            
-            self.activeDownloads[task.taskIdentifier] = active
-            self.storePersistedEntryLocked(
-                self.makePersistedEntry(for: active, state: .inProgress)
-            )
-            task.resume()
-            self.postDidStartDownload()
-            self.postDidChange()
-        }
-    }
-    
+
     // MARK: - Snapshots
     
     private func makeSnapshotLocked() -> DownloadStoreSnapshot {
@@ -677,6 +742,7 @@ final class DownloadStore: NSObject {
                     mimeType: active.mimeType,
                     state: active.isPaused ? .paused : .downloading,
                     canPause: true,
+                    canResume: false,
                     fileExists: true,
                     totalBytes: active.expectedBytes,
                     downloadedBytes: active.downloadedBytes,
@@ -685,19 +751,19 @@ final class DownloadStore: NSObject {
                 )
             }
             .sorted { $0.addedAt > $1.addedAt }
-        
+
         let capturedItems = capturedDownloads.values
             .map { active in
-                let canPause = active.controls != nil
-                return DownloadItemSnapshot(
+                DownloadItemSnapshot(
                     id: active.id,
                     fileName: active.fileName,
                     fileURL: nil,
                     sourceURL: active.sourceURL,
                     originalURL: nil,
                     mimeType: active.mimeType,
-                    state: active.isPaused && canPause ? .paused : .downloading,
-                    canPause: canPause,
+                    state: active.isPaused ? .paused : .downloading,
+                    canPause: false,
+                    canResume: false,
                     fileExists: true,
                     totalBytes: active.expectedBytes,
                     downloadedBytes: active.downloadedBytes,
@@ -705,24 +771,27 @@ final class DownloadStore: NSObject {
                     addedAt: active.addedAt
                 )
             }
-        
+
         let activeItems = (sessionItems + capturedItems)
             .sorted { $0.addedAt > $1.addedAt }
-        
+
         let terminalItems = persistedDownloads
             .compactMap { entry -> DownloadItemSnapshot? in
                 guard entry.effectiveState != .inProgress else {
                     return nil
                 }
-                
+
                 let fileURL = storage.downloadsDirectoryURL.appendingPathComponent(entry.relativePath, isDirectory: false)
                 let isCompleted = entry.effectiveState == .completed
                 let itemState: DownloadItemSnapshot.State
-                if entry.effectiveState == .cancelled {
+                switch entry.effectiveState {
+                case .cancelled:
                     itemState = .cancelled
-                } else if isCompleted {
+                case .completed:
                     itemState = .completed
-                } else {
+                case .paused:
+                    itemState = .paused
+                default:
                     itemState = .failed
                 }
                 return DownloadItemSnapshot(
@@ -734,14 +803,15 @@ final class DownloadStore: NSObject {
                     mimeType: entry.mimeType,
                     state: itemState,
                     canPause: false,
+                    canResume: entry.isResumable,
                     fileExists: isCompleted && fileManager.fileExists(atPath: fileURL.path),
                     totalBytes: isCompleted ? entry.fileSize : nil,
-                    downloadedBytes: isCompleted ? entry.fileSize : 0,
+                    downloadedBytes: isCompleted ? entry.fileSize : (entry.downloadedBytes ?? 0),
                     bytesPerSecond: 0,
                     addedAt: entry.addedAt
                 )
             }
-        
+
         return DownloadStoreSnapshot(summary: makeSummaryLocked(), items: activeItems + terminalItems)
     }
     
@@ -799,18 +869,22 @@ final class DownloadStore: NSObject {
         }
         
         if var entries = try? JSONDecoder().decode([PersistedDownloadEntry].self, from: data) {
-            var markedInterruptedDownloadsAsFailed = false
+            var markedInterruptedDownloads = false
             for index in entries.indices where entries[index].effectiveState == .inProgress {
                 entries[index].state = .failed
-                let destinationURL = storage.downloadsDirectoryURL.appendingPathComponent(
-                    entries[index].relativePath,
-                    isDirectory: false
-                )
-                try? fileManager.removeItem(at: destinationURL)
-                markedInterruptedDownloadsAsFailed = true
+                // Transfers with saved resume data stay resumable from the bytes
+                // already downloaded; everything else is dead weight.
+                if entries[index].resumeData == nil {
+                    let destinationURL = storage.downloadsDirectoryURL.appendingPathComponent(
+                        entries[index].relativePath,
+                        isDirectory: false
+                    )
+                    try? fileManager.removeItem(at: destinationURL)
+                }
+                markedInterruptedDownloads = true
             }
             persistedDownloads = entries.sorted { $0.addedAt > $1.addedAt }
-            if markedInterruptedDownloadsAsFailed {
+            if markedInterruptedDownloads {
                 savePersistedDownloadsLocked()
             }
             return
@@ -831,7 +905,9 @@ final class DownloadStore: NSObject {
     private func makePersistedEntry(
         for download: ActiveDownload,
         state: PersistedDownloadState,
-        fileSize: Int64 = 0
+        fileSize: Int64 = 0,
+        downloadedBytes: Int64? = nil,
+        resumeData: Data? = nil
     ) -> PersistedDownloadEntry {
         return PersistedDownloadEntry(
             id: download.id,
@@ -842,10 +918,12 @@ final class DownloadStore: NSObject {
             mimeType: download.mimeType,
             fileSize: fileSize,
             addedAt: download.addedAt,
-            state: state
+            state: state,
+            resumeData: resumeData,
+            downloadedBytes: downloadedBytes
         )
     }
-    
+
     private func makePersistedEntry(
         for download: CapturedDownload,
         state: PersistedDownloadState,
@@ -860,7 +938,9 @@ final class DownloadStore: NSObject {
             mimeType: download.mimeType,
             fileSize: fileSize,
             addedAt: download.addedAt,
-            state: state
+            state: state,
+            resumeData: nil,
+            downloadedBytes: nil
         )
     }
     
@@ -1123,15 +1203,49 @@ final class DownloadStore: NSObject {
         }
     }
     
-    private func failDownload(taskIdentifier: Int) {
+    private func failDownload(taskIdentifier: Int, resumeData: Data? = nil) {
         guard let active = activeDownloads.removeValue(forKey: taskIdentifier) else {
             return
         }
-        
+
+        // Transient failures (dropped proxy, network switch, timeouts) usually
+        // leave resume data behind; retry automatically a few times before
+        // surfacing the download as failed-but-resumable.
+        if let resumeData, active.autoRetryCount < 3 {
+            active.autoRetryCount += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.retryDownload(active: active, resumeData: resumeData)
+            }
+            return
+        }
+
         storePersistedEntryLocked(
-            makePersistedEntry(for: active, state: .failed)
+            makePersistedEntry(
+                for: active,
+                state: .failed,
+                downloadedBytes: active.downloadedBytes,
+                resumeData: resumeData
+            )
         )
         postDidChange()
+    }
+
+    private func retryDownload(active: ActiveDownload, resumeData: Data) {
+        stateQueue.async {
+            guard !self.activeDownloads.values.contains(where: { $0.id == active.id }) else {
+                return
+            }
+
+            let task = self.session.downloadTask(withResumeData: resumeData)
+            active.task = task
+            active.isPaused = false
+            active.bytesPerSecond = 0
+            active.lastProgressSample = nil
+
+            self.activeDownloads[task.taskIdentifier] = active
+            task.resume()
+            self.postDidChange()
+        }
     }
     
     // MARK: - Notifications
@@ -1172,18 +1286,27 @@ extension DownloadStore: URLSessionDownloadDelegate {
         didFinishDownloadingTo location: URL
     ) {
         stateQueue.sync {
+            // URLSession hands over the body even for HTTP errors (e.g. a 404
+            // HTML page); never save those as the downloaded file.
+            if let httpResponse = downloadTask.response as? HTTPURLResponse,
+               httpResponse.statusCode >= 400 {
+                self.failDownload(taskIdentifier: downloadTask.taskIdentifier)
+                return
+            }
+
             self.completeDownload(taskIdentifier: downloadTask.taskIdentifier, temporaryLocation: location)
         }
     }
-    
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error else {
             return
         }
-        
+
+        let resumeData = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+
         stateQueue.async {
-            _ = error
-            self.failDownload(taskIdentifier: task.taskIdentifier)
+            self.failDownload(taskIdentifier: task.taskIdentifier, resumeData: resumeData)
         }
     }
 }

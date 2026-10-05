@@ -198,7 +198,7 @@ final class ReynardDefaultPreferencesViewController: SettingsTableViewController
             return SettingsSectionText(
                 headerTitle: NSLocalizedString("Redirect Sources", comment: ""),
                 footerTitle: NSLocalizedString(
-                    "Checked apps hand the web links they open to Reynard instead of their own browser; unchecked apps behave normally. Safari is checked by default. The ReynardDefault master switch in system Settings must also be on.",
+                    "Checked apps hand the web links they open to Reynard instead of their own browser. Safari is checked by default. This per-app list only applies while the 'Redirect All Web Links' switch in system Settings is off; browser app launches are never redirected.",
                     comment: ""
                 )
             )

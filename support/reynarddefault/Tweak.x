@@ -8,17 +8,23 @@
 static NSString *const kReynardBundleID = @"com.minh-ton.Reynard";
 static NSString *const kReynardURLScheme = @"reynard";
 static NSString *const kDefaultRedirectBundleID = @"com.apple.mobilesafari";
+static NSString *const kGlobalKey = @"global";
 
 static BOOL enabled = NO;
+static BOOL globalRedirect = YES;
 
 static void loadPrefs(void) {
     NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
     enabled = [prefs objectForKey:kEnabledKey] ? [prefs boolForKey:kEnabledKey] : NO;
+    id globalValue = [prefs objectForKey:kGlobalKey];
+    globalRedirect = globalValue ? [globalValue boolValue] : YES;
 }
 
 // Wrap http(s) URLs as reynard://open?url=<encoded> so iOS routes them via
 // the scheme Reynard actually claims. Reynard's SceneDelegate decodes this
-// form back to the original URL.
+// form back to the original URL. Returns nil for anything that is not a web
+// link (plain app launches carry no URL at all, so browser icons stay
+// launchable).
 static NSURL *wrapHTTPURLForReynard(NSURL *original) {
     NSString *scheme = original.scheme.lowercaseString;
     if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) {
@@ -30,11 +36,10 @@ static NSURL *wrapHTTPURLForReynard(NSURL *original) {
     return [NSURL URLWithString:[NSString stringWithFormat:@"%@://open?url=%@", kReynardURLScheme, encoded]];
 }
 
-// The set of redirect sources is user-defined: Reynard's "Default Browser
-// Redirect" settings screen writes "redirect.<bundle id>" keys into the
-// shared preference suite for any installed app (including TrollStore
-// installs). The quick per-browser switches in system Settings edit the same
-// keys. When nothing is configured, Safari redirects by default so that
+// Per-app redirect sources ("redirect.<bundle id>" keys, written by Reynard's
+// "Default Browser Redirect" screen for any installed app or by the quick
+// per-browser switches in system Settings). Only consulted when the global
+// switch is off. With nothing configured, Safari is the default source so
 // links other apps hand to Safari land in Reynard out of the box.
 static BOOL shouldRedirectBundle(NSString *bundleIdentifier) {
 	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
@@ -50,18 +55,19 @@ static BOOL shouldRedirectBundle(NSString *bundleIdentifier) {
     NSURL *wrapped = nil;
     if (enabled
         && bundleIdentifier != nil
-        && shouldRedirectBundle(bundleIdentifier)
+        && ![bundleIdentifier isEqualToString:kReynardBundleID]
         && [self respondsToSelector:@selector(URL)]
         && [self respondsToSelector:@selector(setURL:)]) {
-        // Only web links are redirected; app-specific URL schemes pass
-        // through untouched so checked apps keep working.
-        wrapped = wrapHTTPURLForReynard(self.URL);
+        if (globalRedirect || shouldRedirectBundle(bundleIdentifier)) {
+            wrapped = wrapHTTPURLForReynard(self.URL);
+        }
     }
 
     if (wrapped) {
         self.URL = wrapped;
         %orig(kReynardBundleID);
     } else {
+        // Plain app launches (no web link) always open the real browser.
         %orig;
     }
 }

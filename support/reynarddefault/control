@@ -1,6 +1,6 @@
 Package: com.guacforlife.reynarddefault
 Name: ReynardDefault
-Version: 1.6.2
+Version: 1.7.0
 Architecture: iphoneos-arm
 Description: Web links open in Reynard globally; browsers themselves stay launchable (only http(s) links are hijacked). Per-app sources configurable in Reynard's settings. Inline toggles, no preference bundle; iPadOS 15.x compatible.
 Maintainer: TsangAsuna

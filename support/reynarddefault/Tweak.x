@@ -1,15 +1,15 @@
 #import <Foundation/Foundation.h>
 #import "Common/Common.h"
 
-// Real class shapes (iOS 14–16 runtime headers, FrontBoardServices):
-// FBSystemServiceOpenApplicationRequest carries only bundleIdentifier /
-// options / clientProcess / trusted. The web link of an open lives in the
-// options payload, exposed by FBSOpenApplicationOptions' readonly "url"
-// property (lowercase). Swapping the bundle identifier leaves the payload
-// untouched, so the opened app receives the original URL directly —
-// Reynard's SceneDelegate handles plain http(s) URLs.
+// FrontBoardServices ground truth (iOS 14–16 runtime headers + the payload
+// key confirmed by LorenzoPane/browserdefault): FBSystemServiceOpenApplication
+// Request carries only bundleIdentifier/options/clientProcess/trusted, and a
+// web link shows up in the options payload under the literal key
+// "__PayloadURL" (= FBSOpenApplicationOptionKeyPayloadURL). Swapping the
+// bundle identifier leaves the payload untouched, so the opened app receives
+// the original URL directly — Reynard's SceneDelegate handles plain http(s).
 @interface FBSOpenApplicationOptions : NSObject
-@property (nonatomic, readonly) NSURL *url;
+@property (nonatomic, copy) NSDictionary *dictionary;
 @end
 
 @interface FBSystemServiceOpenApplicationRequest : NSObject
@@ -18,8 +18,16 @@
 @end
 
 static NSString *const kReynardBundleID = @"com.minh-ton.Reynard";
-static NSString *const kDefaultRedirectBundleID = @"com.apple.mobilesafari";
+static NSString *const kPayloadURLKey = @"__PayloadURL";
 static NSString *const kGlobalKey = @"global";
+
+// The proven v1.5.1 swap list: browsers that links are normally handed to.
+static NSString *const kBrowserBundleIDs[] = {
+	@"com.apple.mobilesafari",
+	@"org.mozilla.ios.Firefox",
+	@"com.google.chrome.ios",
+	@"com.brave.ios.browser"
+};
 
 static BOOL enabled = NO;
 static BOOL globalRedirect = YES;
@@ -31,17 +39,16 @@ static void loadPrefs(void) {
     globalRedirect = globalValue ? [globalValue boolValue] : YES;
 }
 
-static BOOL isWebLinkURL(NSURL *url) {
-    if (url == nil) return NO;
-    NSString *scheme = url.scheme.lowercaseString;
-    return [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+static BOOL isBrowserTarget(NSString *bundleIdentifier) {
+	for (size_t i = 0; i < sizeof(kBrowserBundleIDs) / sizeof(kBrowserBundleIDs[0]); i++) {
+		if ([kBrowserBundleIDs[i] isEqualToString:bundleIdentifier]) return YES;
+	}
+	return NO;
 }
 
 // Per-app redirect sources ("redirect.<bundle id>" keys, written by Reynard's
-// "Default Browser Redirect" screen or the quick switches in system
-// Settings). Only consulted when the global switch is off. With nothing
-// configured, Safari is the default source so links other apps hand to
-// Safari land in Reynard out of the box.
+// "Default Browser Redirect" screen). Only consulted when the global switch
+// is off. With nothing configured, Safari is the default source.
 static BOOL shouldRedirectBundle(NSString *bundleIdentifier) {
 	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
 	id value = [prefs objectForKey:[@"redirect." stringByAppendingString:bundleIdentifier]];
@@ -49,31 +56,31 @@ static BOOL shouldRedirectBundle(NSString *bundleIdentifier) {
 	return [bundleIdentifier isEqualToString:kDefaultRedirectBundleID];
 }
 
+// A plain browser launch (icon tap) is only skipped when the options payload
+// is already populated and carries no URL entry. Anything inconclusive falls
+// back to the proven v1.5.1 swap so the redirect never silently dies again.
+static BOOL isConfirmedPlainLaunch(FBSystemServiceOpenApplicationRequest *self) {
+	if (![self respondsToSelector:@selector(options)]) return NO;
+	FBSOpenApplicationOptions *options = [self options];
+	if (options == nil || ![options respondsToSelector:@selector(dictionary)]) return NO;
+	NSDictionary *payload = [options dictionary];
+	if (payload == nil) return NO;
+	return [payload objectForKey:kPayloadURLKey] == nil;
+}
+
 %hook FBSystemServiceOpenApplicationRequest
 
-// Only open requests that actually carry a web link in their options are
-// hijacked. Plain browser launches (icon taps: options without a URL) always
-// open the real browser.
 - (void)setBundleIdentifier:(NSString *)bundleIdentifier {
-    loadPrefs();
-    BOOL redirect = NO;
-    if (enabled
-        && bundleIdentifier != nil
-        && ![bundleIdentifier isEqualToString:kReynardBundleID]
-        && (globalRedirect || shouldRedirectBundle(bundleIdentifier))) {
-        NSURL *webURL = nil;
-        FBSOpenApplicationOptions *options = [self options];
-        if ([options respondsToSelector:@selector(url)]) {
-            webURL = [options url];
-        }
-        redirect = isWebLinkURL(webURL);
-    }
-
-    if (redirect) {
-        %orig(kReynardBundleID);
-    } else {
-        %orig;
-    }
+	loadPrefs();
+	if (enabled
+		&& bundleIdentifier != nil
+		&& ![bundleIdentifier isEqualToString:kReynardBundleID]
+		&& (globalRedirect || shouldRedirectBundle(bundleIdentifier))
+		&& (isBrowserTarget(bundleIdentifier) || shouldRedirectBundle(bundleIdentifier))
+		&& !isConfirmedPlainLaunch(self)) {
+		bundleIdentifier = kReynardBundleID;
+	}
+	%orig;
 }
 
 %end

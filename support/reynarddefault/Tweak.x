@@ -18,6 +18,7 @@
 @end
 
 static NSString *const kReynardBundleID = @"com.minh-ton.Reynard";
+static NSString *const kDefaultRedirectBundleID = @"com.apple.mobilesafari";
 static NSString *const kPayloadURLKey = @"__PayloadURL";
 static NSString *const kGlobalKey = @"global";
 

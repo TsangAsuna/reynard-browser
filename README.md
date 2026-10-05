@@ -84,6 +84,15 @@ If it does not appear on your device (e.g. iPadOS 15.1), install the companion *
 - Rootless debs (`*_iphoneos-arm64.deb`) are for Dopamine/Roothide; rootful debs (`*_iphoneos-arm.deb`) are for unc0ver/palera1n rootful.
 - The toggle is an inline switch in the main Settings list and does not load any preference bundle, so it cannot crash the Settings app (this fork fixes the iPadOS 15.1 crash found in [guacforlife/ReynardDefault](https://github.com/guacforlife/ReynardDefault), on which the tweak is based).
 
+## Resumable downloads (this fork)
+
+> This is a fork-specific addition, not part of upstream minh-ton/reynard-browser.
+
+Web downloads are fetched by the app's own `URLSession` client instead of the engine's networking stack, which brings two changes:
+
+- **System proxy support** — downloads honor the iOS system HTTP proxy (the engine's stack ignores it, so downloads used to bypass your proxy entirely).
+- **Resumable transfers** — interrupted downloads (dropped proxy, network switch, app relaunch) keep their resume data; failed downloads show a **Resume** swipe action and continue from the bytes already downloaded. Pausing also survives an app relaunch now. Transient failures retry automatically up to 3 times before surfacing as resumable failures.
+
 ## Preview
 
 ### iOS 14 (iPhone 6S Plus, 14.1)

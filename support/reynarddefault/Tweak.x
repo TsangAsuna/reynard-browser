@@ -23,6 +23,18 @@ static BOOL isRedirectTarget(NSString *bundleIdentifier) {
 	return NO;
 }
 
+// Per-browser switches are stored under "redirect.<bundle id>". Safari
+// defaults to on (the "default browser" use case); the other browsers default
+// to off so that apps relying on them (OAuth hand-offs, in-app browser flows)
+// keep working unless the user opts in.
+static BOOL isRedirectEnabledForBundle(NSString *bundleIdentifier) {
+	NSString *key = [@"redirect." stringByAppendingString:bundleIdentifier];
+	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
+	id value = [prefs objectForKey:key];
+	if (value != nil) return [value boolValue];
+	return [bundleIdentifier isEqualToString:@"com.apple.mobilesafari"];
+}
+
 static BOOL enabled = NO;
 
 static void loadPrefs(void) {
@@ -50,7 +62,7 @@ static NSURL *wrapHTTPURLForReynard(NSURL *original) {
 
 - (void)setBundleIdentifier:(NSString *)bundleIdentifier {
     loadPrefs();
-    if (enabled && isRedirectTarget(bundleIdentifier)) {
+    if (enabled && isRedirectTarget(bundleIdentifier) && isRedirectEnabledForBundle(bundleIdentifier)) {
         if ([self respondsToSelector:@selector(URL)] && [self respondsToSelector:@selector(setURL:)]) {
             NSURL *wrapped = wrapHTTPURLForReynard(self.URL);
             if (wrapped) self.URL = wrapped;

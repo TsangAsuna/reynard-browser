@@ -5,35 +5,9 @@
 @property (nonatomic, copy) NSURL *URL;
 @end
 
-// Plain C array of constant strings: an @[] literal is only a valid static
-// initializer under ARC, which some Theos toolchains don't apply here.
-static NSString *const kBrowserBundleIDs[] = {
-	@"com.apple.mobilesafari",
-	@"org.mozilla.ios.Firefox",
-	@"com.google.chrome.ios",
-	@"com.brave.ios.browser"
-}; // what else is popular...?
 static NSString *const kReynardBundleID = @"com.minh-ton.Reynard";
 static NSString *const kReynardURLScheme = @"reynard";
-
-static BOOL isRedirectTarget(NSString *bundleIdentifier) {
-	for (size_t i = 0; i < sizeof(kBrowserBundleIDs) / sizeof(kBrowserBundleIDs[0]); i++) {
-		if ([kBrowserBundleIDs[i] isEqualToString:bundleIdentifier]) return YES;
-	}
-	return NO;
-}
-
-// Per-browser switches are stored under "redirect.<bundle id>". Safari
-// defaults to on (the "default browser" use case); the other browsers default
-// to off so that apps relying on them (OAuth hand-offs, in-app browser flows)
-// keep working unless the user opts in.
-static BOOL isRedirectEnabledForBundle(NSString *bundleIdentifier) {
-	NSString *key = [@"redirect." stringByAppendingString:bundleIdentifier];
-	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
-	id value = [prefs objectForKey:key];
-	if (value != nil) return [value boolValue];
-	return [bundleIdentifier isEqualToString:@"com.apple.mobilesafari"];
-}
+static NSString *const kDefaultRedirectBundleID = @"com.apple.mobilesafari";
 
 static BOOL enabled = NO;
 
@@ -44,9 +18,7 @@ static void loadPrefs(void) {
 
 // Wrap http(s) URLs as reynard://open?url=<encoded> so iOS routes them via
 // the scheme Reynard actually claims. Reynard's SceneDelegate decodes this
-// form back to the original URL. Without this, iOS 14 LaunchServices drops
-// the http(s) URL after ReynardDefault swaps the bundle ID, because Reynard
-// doesn't register http/https handlers in its Info.plist.
+// form back to the original URL.
 static NSURL *wrapHTTPURLForReynard(NSURL *original) {
     NSString *scheme = original.scheme.lowercaseString;
     if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) {
@@ -58,15 +30,36 @@ static NSURL *wrapHTTPURLForReynard(NSURL *original) {
     return [NSURL URLWithString:[NSString stringWithFormat:@"%@://open?url=%@", kReynardURLScheme, encoded]];
 }
 
+// The set of redirect sources is user-defined: Reynard's "Default Browser
+// Redirect" settings screen writes "redirect.<bundle id>" keys into the
+// shared preference suite for any installed app (including TrollStore
+// installs). The quick per-browser switches in system Settings edit the same
+// keys. When nothing is configured, Safari redirects by default so that
+// links other apps hand to Safari land in Reynard out of the box.
+static BOOL shouldRedirectBundle(NSString *bundleIdentifier) {
+	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
+	id value = [prefs objectForKey:[@"redirect." stringByAppendingString:bundleIdentifier]];
+	if (value != nil) return [value boolValue];
+	return [bundleIdentifier isEqualToString:kDefaultRedirectBundleID];
+}
+
 %hook FBSystemServiceOpenApplicationRequest
 
 - (void)setBundleIdentifier:(NSString *)bundleIdentifier {
     loadPrefs();
-    if (enabled && isRedirectTarget(bundleIdentifier) && isRedirectEnabledForBundle(bundleIdentifier)) {
-        if ([self respondsToSelector:@selector(URL)] && [self respondsToSelector:@selector(setURL:)]) {
-            NSURL *wrapped = wrapHTTPURLForReynard(self.URL);
-            if (wrapped) self.URL = wrapped;
-        }
+    NSURL *wrapped = nil;
+    if (enabled
+        && bundleIdentifier != nil
+        && shouldRedirectBundle(bundleIdentifier)
+        && [self respondsToSelector:@selector(URL)]
+        && [self respondsToSelector:@selector(setURL:)]) {
+        // Only web links are redirected; app-specific URL schemes pass
+        // through untouched so checked apps keep working.
+        wrapped = wrapHTTPURLForReynard(self.URL);
+    }
+
+    if (wrapped) {
+        self.URL = wrapped;
         %orig(kReynardBundleID);
     } else {
         %orig;

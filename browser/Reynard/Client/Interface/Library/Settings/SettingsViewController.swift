@@ -36,7 +36,9 @@ final class SettingsViewController: SettingsTableViewController {
     
     private let updatesSection = UpdatesSettingsSection()
     private let jitSection = JITSettingsSection()
-    private let generalSection = GeneralSettingsSection()
+    private let generalSection = GeneralSettingsSection(
+        showsDefaultBrowserRedirect: getEntitlementValue("com.apple.private.security.no-sandbox")
+    )
     private let privacySection = PrivacySettingsSection()
     private let advancedSection = AdvancedSettingsSection()
     private let aboutSection = AboutSettingsSection()

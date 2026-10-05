@@ -1,8 +1,8 @@
 Package: com.guacforlife.reynarddefault
 Name: ReynardDefault
-Version: 1.5.2
+Version: 1.6.0
 Architecture: iphoneos-arm
-Description: Redirects browser URL opens to Reynard, with per-browser switches (Safari/Chrome/Firefox/Brave). Inline Settings toggles, no preference bundle; iPadOS 15.x compatible.
+Description: Redirects browser URL opens to Reynard with per-app control (pick redirect sources in Reynard's settings; quick Safari/Chrome/Firefox/Brave switches in system Settings). Inline toggles, no preference bundle; iPadOS 15.x compatible.
 Maintainer: TsangAsuna
 Author: guacforlife
 Section: Tweaks

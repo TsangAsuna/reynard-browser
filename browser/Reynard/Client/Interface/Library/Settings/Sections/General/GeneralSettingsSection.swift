@@ -8,7 +8,7 @@
 import UIKit
 
 struct GeneralSettingsSection {
-    enum Row: CaseIterable {
+    enum Row {
         case addons
         case browsing
         case search
@@ -16,18 +16,40 @@ struct GeneralSettingsSection {
         case homepage
         case languages
         case appearance
+        case defaultBrowserRedirect
     }
-    
+
+    private let rows: [Row]
+
+    init(showsDefaultBrowserRedirect: Bool) {
+        var rows: [Row] = [
+            .addons,
+            .browsing,
+            .search,
+            .newTab,
+            .homepage,
+            .languages,
+            .appearance,
+        ]
+        // Listing installed apps requires the private LaunchServices workspace
+        // API and writing the tweak's global preferences requires an
+        // unsandboxed build, so only offer it there.
+        if showsDefaultBrowserRedirect {
+            rows.append(.defaultBrowserRedirect)
+        }
+        self.rows = rows
+    }
+
     var rowCount: Int {
-        return Row.allCases.count
+        return rows.count
     }
-    
+
     func cell(at index: Int) -> UITableViewCell {
-        guard Row.allCases.indices.contains(index) else {
+        guard rows.indices.contains(index) else {
             return UITableViewCell()
         }
-        
-        switch Row.allCases[index] {
+
+        switch rows[index] {
         case .addons:
             return SettingsViewUtils.disclosureCell(title: NSLocalizedString("Add-ons", comment: ""))
         case .browsing:
@@ -42,16 +64,18 @@ struct GeneralSettingsSection {
             return SettingsViewUtils.disclosureCell(title: NSLocalizedString("Languages", comment: ""))
         case .appearance:
             return SettingsViewUtils.disclosureCell(title: NSLocalizedString("Appearance", comment: ""))
+        case .defaultBrowserRedirect:
+            return SettingsViewUtils.disclosureCell(title: NSLocalizedString("Default Browser Redirect", comment: ""))
         }
     }
-    
+
     func selectRow(at index: Int, from viewController: UIViewController) {
-        guard Row.allCases.indices.contains(index) else {
+        guard rows.indices.contains(index) else {
             return
         }
-        
+
         let destination: UIViewController
-        switch Row.allCases[index] {
+        switch rows[index] {
         case .addons:
             destination = AddonsPreferencesViewController()
         case .browsing:
@@ -66,6 +90,8 @@ struct GeneralSettingsSection {
             destination = LanguagesPreferencesViewController()
         case .appearance:
             destination = AppearancePreferencesViewController()
+        case .defaultBrowserRedirect:
+            destination = ReynardDefaultPreferencesViewController()
         }
         viewController.navigationController?.pushViewController(destination, animated: true)
     }

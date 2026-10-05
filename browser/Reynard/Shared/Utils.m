@@ -31,14 +31,46 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t * __restri
 BOOL getEntitlementValue(NSString *key) {
     void *secTask = SecTaskCreateFromSelf(NULL);
     if (!secTask) return NO;
-    
+
     CFTypeRef value = SecTaskCopyValueForEntitlement(secTask, key, nil);
     CFRelease(secTask);
     if (!value) return NO;
-    
+
     BOOL hasValue = ![(__bridge id)value isKindOfClass:NSNumber.class] || [(__bridge NSNumber *)value boolValue];
     CFRelease(value);
     return hasValue;
+}
+
+NSArray<NSDictionary<NSString *, NSString *> *> *ReynardCopyInstalledApplications(void) {
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    id workspace = [workspaceClass performSelector:NSSelectorFromString(@"defaultWorkspace")];
+    if (!workspace) return @[];
+
+    NSArray *applications = nil;
+    SEL plainSelector = NSSelectorFromString(@"allInstalledApplications");
+    SEL optionsSelector = NSSelectorFromString(@"allInstalledApplicationsForOptions:");
+    if ([workspace respondsToSelector:plainSelector]) {
+        applications = [workspace performSelector:plainSelector];
+    } else if ([workspace respondsToSelector:optionsSelector]) {
+        applications = [workspace performSelector:optionsSelector withObject:@{}];
+    }
+    if (!applications) return @[];
+
+    NSString *ownBundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *result = [NSMutableArray array];
+    for (id application in applications) {
+        NSString *bundleID = [application valueForKey:@"bundleIdentifier"];
+        if (![bundleID isKindOfClass:NSString.class] || [bundleID isEqualToString:ownBundleID]) continue;
+
+        NSString *displayName = [application valueForKey:@"localizedName"];
+        if (![displayName isKindOfClass:NSString.class]) {
+            displayName = [application valueForKey:@"displayName"];
+        }
+        if (![displayName isKindOfClass:NSString.class]) displayName = bundleID;
+
+        [result addObject:@{@"bundleID": bundleID, @"name": displayName}];
+    }
+    return result;
 }
 
 void updateJetsamControl(pid_t pid) {

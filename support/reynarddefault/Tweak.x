@@ -32,6 +32,8 @@ static NSString *const kBrowserBundleIDs[] = {
 
 static BOOL enabled = NO;
 static BOOL globalRedirect = YES;
+static NSString *pendingOriginalBundleID = nil;
+static BOOL restoringBundleID = NO;
 
 static void loadPrefs(void) {
     NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
@@ -73,15 +75,48 @@ static BOOL isConfirmedPlainLaunch(FBSystemServiceOpenApplicationRequest *self) 
 
 - (void)setBundleIdentifier:(NSString *)bundleIdentifier {
 	loadPrefs();
+	if (restoringBundleID) {
+		%orig;
+		return;
+	}
+
+	pendingOriginalBundleID = nil;
 	if (enabled
 		&& bundleIdentifier != nil
 		&& ![bundleIdentifier isEqualToString:kReynardBundleID]
 		&& (globalRedirect || shouldRedirectBundle(bundleIdentifier))
 		&& (isBrowserTarget(bundleIdentifier) || shouldRedirectBundle(bundleIdentifier))
 		&& !isConfirmedPlainLaunch(self)) {
+		// Swap now (the v1.5.1-proven behavior) but remember the original:
+		// if the options payload later turns out to carry no web link, the
+		// setOptions: hook below undoes this so plain browser launches open
+		// the real browser.
+		pendingOriginalBundleID = bundleIdentifier;
 		bundleIdentifier = kReynardBundleID;
 	}
 	%orig;
+}
+
+- (void)setOptions:(FBSOpenApplicationOptions *)options {
+	%orig;
+	if (pendingOriginalBundleID == nil) return;
+
+	NSString *original = [pendingOriginalBundleID copy];
+	pendingOriginalBundleID = nil;
+
+	NSDictionary *payload = nil;
+	if ([options respondsToSelector:@selector(dictionary)]) {
+		payload = [options dictionary];
+	}
+
+	// No URL entry in the payload: this open is a plain launch, so hand it
+	// back to the originally requested browser. Web-link opens keep the swap
+	// and receive the original URL through the untouched payload.
+	if (payload != nil && [payload objectForKey:kPayloadURLKey] == nil) {
+		restoringBundleID = YES;
+		[self setBundleIdentifier:original];
+		restoringBundleID = NO;
+	}
 }
 
 %end

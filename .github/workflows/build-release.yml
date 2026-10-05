@@ -40,7 +40,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
-          token: ${{ secrets.RELEASE_TOKEN }}
+          # Fork: upstream uses a private RELEASE_TOKEN secret; github.token
+          # suffices for releases in the same repository.
+          token: ${{ github.token }}
           draft: true
           fail_on_unmatched_files: true
           files: |

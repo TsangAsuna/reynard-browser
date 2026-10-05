@@ -33,7 +33,8 @@ permissions:
 
 jobs:
   prepare:
-    if: ${{ github.repository_owner == 'minh-ton' }}
+    # Fork: upstream gates this on repository_owner == 'minh-ton'; removed so the
+    # workflow runs on this fork. Everything else is upstream-verbatim.
     name: Select build variants
     runs-on: ubuntu-latest
     outputs:

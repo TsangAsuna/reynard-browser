@@ -633,7 +633,7 @@ final class DownloadStore: NSObject {
             )
             let destinationURL = self.makeUniqueDestinationURLLocked(for: fileName)
 
-            let request = URLRequest(url: sourceURL)
+            var request = URLRequest(url: sourceURL)
             if let responseHeaders {
                 // The engine hands over the original response headers; forward the
                 // request-relevant ones so authenticated/CDN downloads keep working
